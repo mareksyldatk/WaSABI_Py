@@ -1,9 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Created on Thu Oct  2 16:27:02 2014
+WaSABI_Py Bayesian Quadrature package
 
-@author: marek
+@author: Marek Syldatk
+@references:
+[1]
+[2]
+
+TODO Notes:
+[ ] sample() and initialization() - remove model refitting, compact the 
+    repeated code int oone method to avoid problems
+[ ] add mean_Z() and var_Z(): methods to compute mean and var of the integral
 """
+
 from __future__ import division
 import GPy
 import numpy as np
@@ -14,78 +23,90 @@ from DIRECT import solve
 
 #%% Define BQ Class
 class BQ(object):
-    """ This is a Bayesian Quadrature class """
+    """ Bayesian Quadrature class """
 
     # Constructor:
-    def __init__(self, dim=1, obs_noise=0.0001, likelihood_l=None, 
-                 prior_type = "normal", 
-                 transformation="square-root", 
-                 approximation="linearisation", 
-                 sampling="uncertainty"
+    def __init__(self, 
+                 dim                = 1, 
+                 obs_noise          = 0.001, 
+                 likelihood_l       = None, 
+                 gp_kernel          = None,
+                 gp_set_constraints = None,
+                 prior_type         = "normal", 
+                 prior_parameters   = None,
+                 transformation     = "wsabi-l", 
+                 sampling           = "uncertainty"
                  ):
                      
-        # Basic settings:
-        self.dim            = dim
-        self.transformation = transformation
-        self.approximation  = approximation
-        self.sampling       = sampling
+        # BASIC SETTINGS:
+        # ----------
+        # Input dimension
+        self.dim                = dim
+        # Set transformation/approximation/sampling type:
+        self.transformation     = transformation
+        self.sampling           = sampling
+        # Set observation noise:
+        self.obs_noise          = obs_noise
         
+        # DATA POINTS:
+        # ---------
+        # Current sample/likelihood values:
+        self.X      = None
+        self.Y      = None
+        # Predicted sample value:
+        self.Xstar  = None
+        
+        # TRANSFORMATION PARAMETERS:
+        # ----------         
+        # Square-root transformation:
         self.alpha = None
-        self.obs_noise = obs_noise
         
-        # GPy parameters:        
-        self.gp = None
-        self.gp_kernel = None
-        # GPy optimization and regression settings:
-        self.gp_parOptimization = {"num_restarts": 10, "verbose": False}
-        self.gp_parRegression   = {}
-        self.gp_parPrediction   = {}
+        # GAUSSIAN PROCESS PARAMETERS:
+        # ----------
+        # Set GP object and kernel
+        self.gp                 = None
+        self.gp_kernel          = gp_kernel
+        # Set GP parameter constraints using function:
+        self.gp_set_constraints = gp_set_constraints
+        # Set optional optimization/regression/prediction parameters:
+        self.par_optimization   = {"num_restarts": 10, "verbose": False}
+        self.par_regression     = {}
+        self.par_prediction     = {}
         
-        # Likelihood function
+        # LIKELIHOOD FUNCTION:
+        # ----------
         self.likelihood_l = likelihood_l
+
+        # PRIOR:
+        # ----------
+        # Prior type:
+        self.prior_type         = prior_type  
+        # Set default prior parameters dependint on prior type:
+        self.prior_parameters   = prior_parameters     
         
-        # Prior parameters
-        self.prior_type = prior_type  
-        self.prior_parameters = None     
-        self.set_prior_parameters()     # Set default prior parameters
-        
-        # Data points
-        self.X = None
-        self.Y = None
-        # Next sample point
-        self.Xstar = None
-        self.Ystar = None        
-        
-    # Methods: PRINT DETAILS    
-    def details(self):
-        print("\nBayesian Quadrature model details:")
-        print("- "*10)
-        print("Input dimension: "      + str(self.dim))
-        print("Transformation type: "  + self.transformation)
-        print("Approximation method: " + self.approximation)        
-        print("Sampling method: "      + self.sampling)   
-        print("\nPrior type: "         + self.prior_type)
-        print("Priot parameters: "), 
-        print(self.prior_parameters)
-        print("\nGP details:")
-        print("- "*10),
-        print(self.gp)
+        # PyDIRECT SOLVE PARAMETERS:
+        # ----------
+        self.par_solve =  {"algmethod": 1, "maxT": 333, "maxf": 1000}    
     
-    # Methods: GAUSSIAN PROCESS
+    # %%
+    #
+    # ##### ##### #####     METHODS: GAUSSIAN PROCESS     ##### ##### ##### #
+    #
+    
     def gp_regression(self, X, Y, **kwargs):
         """ Fit the Gaussian Process.
             Method uses GPy.models.GPRegression() to fit the GP model, using
             previously defined kernel. """
         # Default parameters:    
         if len(kwargs) == 0:
-            kwargs = self.gp_parRegression
+            kwargs = self.par_regression
         
         # Apply transformation
-        if self.transformation == "square-root":
-            #print("transform")
-            newY, self.alpha = ws.log_transform(Y)
+        if self.transformation == "wsabi-l":
+            newY, self.alpha = ws.log_transform(Y)  
         else:
             newY = Y
+        
         # Fit GP model        
         self.gp = GPy.models.GPRegression(X, newY, self.gp_kernel, **kwargs)
 
@@ -94,7 +115,7 @@ class BQ(object):
             Method uses GPy.optimize_restarts(), to optimize the hyper 
             parameters. """
         if len(kwargs) == 0:
-            kwargs = self.gp_parOptimization
+            kwargs = self.par_optimization
             
         self.gp.optimize_restarts(**kwargs)
         
@@ -107,66 +128,29 @@ class BQ(object):
         lower, upper = self.gp.predict_quantiles(Xnew)
         
         # Invert the transformation:
-        if self.transformation == "square-root":
-            # print("inv transform")
+        if self.transformation == "wsabi-l":
             mean, cov, lower, upper = ws.log_transform_inv(mean, cov, self.alpha)
             
         # Return all
         return(mean, cov, lower, upper)
         
-    def plot(self):
-        # PLOT 1:
-        # Fitted GP mean(x) and variance(x), prior pi(x) and likelihood l(x)
-        # Also: current samples (orange) and next sample (red)
-        ax = plt.subplot(211)
-        plt.rcParams['lines.linewidth'] = 1.5
-        # Get scale
-        if self.prior_type == "normal":
-            mu = self.prior_parameters['mu']
-            sigma = self.prior_parameters['sigma']
-            x_min = mu - 3*sigma
-            x_max = mu + 3*sigma
+    # %%
+    #
+    # ##### ##### #####     METHODS: PRIOR     ##### ##### ##### #
+    #
         
-        # Plot GP
-        pltX  = np.array([np.linspace(x_min,x_max,1000)]).T
-        mean, cov, lower, upper = self.gp_prediction(pltX)
-        GPy.plotting.matplot_dep.base_plots.gpplot(pltX, mean, lower, upper, ax=ax)
-        # Plot likelihood:
-        plt.plot(pltX, self.likelihood_l(pltX), '-r')  
-        # Plot prior:
-        plt.plot(pltX, self.evaluate_prior(pltX), color='#ffa500')
-        # Plot observations:
-        plt.plot(self.X, self.Y, 'o', color='#ffa500', ms=5)
-        # Plot next sample:
-        if self.Xstar is not None:
-            plt.plot(self.Xstar, self.Ystar, 'o', color='r', ms=5)
-        # Change axis limits:
-        plt.xlim([x_min, x_max])
-        
-        # PLOT 2:
-        # Plot objective
-        ax = plt.subplot(2,1,2)
-        pltY  = -self.opt_objective(pltX)[0]
-        pltY[0]  = 0
-        pltY[-1] = 0
-        plt.plot(pltX, pltY, 'k', alpha=0.5)
-        plt.fill(pltX, pltY, color='k', alpha=0.25)
-        # Change axis limits:
-        plt.xlim([x_min, x_max])
-        return None
-        
-    # Methods: PRIOR FUNCTIONS
-    def set_prior_parameters(self, **kwargs):
-        """ Set prior parameters.
-            If no **kwargs given, set defaults based on prior type."""
+    # METHOD: Set default prior parameters:
+    # --
+    def set_default_prior_parameters(self):
+        """ Set default prior parameters. """
             
         # Normal prior (default)
         if self.prior_type == "normal":
-            if len(kwargs) != 0:
-                self.prior_parameters = kwargs
-            else:
-                self.prior_parameters = {"mu": 0.0, "sigma": 1.00}
+            self.prior_parameters = {"mu": 0.00, "sigma": 1.00}
         
+    
+    # METHOD: Get N samples from prior:
+    # --    
     def sample_prior(self, N=1):
         """ Draw N samples from the prior. """
         # Normal prior (default):
@@ -178,6 +162,8 @@ class BQ(object):
             samples = np.array([[s] for s in samples])
         return (samples)
     
+    # METHOD: Evaluate prior at given X
+    # --
     def evaluate_prior(self, X):
         """ Evaluate value of prior at given point. """
         # Normal prior (default):
@@ -188,24 +174,43 @@ class BQ(object):
             
         return(result)
         
-    # Methods: QUADRATURE
-    def initialize_sampler(self, Xinit=None):
+    # %%
+    #
+    # ##### ##### #####     METHODS: QUADRATURE     ##### ##### ##### #
+    #
+    
+    # METHOD: Sampler initialization
+    # --    
+    def initialize_sampler(self, Xinit=None, Yinit=None):
         """ Initialize sampler with first sample. 
             Fit GP immediately. """
         
-        # Get initial sample (randomly sampled from prior or set using Xinit)
-        if Xinit is None:
-            self.X = self.sample_prior(1)
-        else:
-            self.X = Xinit
-            
-        # Prepare observations:
-        self.Y = self.likelihood_l(self.X)
+        # Initialize prior with default parameters:
+        if self.prior_parameters is None:
+            self.set_default_prior_parameters()       
+        
+        # INITIAL DATA:
+        # --
+        # Set initial sample(s)
+        # Randomly sampled from prior or set using Xinit
+        self.X = self.sample_prior(1) if Xinit is None else Xinit        
+        
+        # Set initial observation(s)
+        # Evaluated on X or set using Yinit
+        self.Y = self.likelihood_l(self.X) if Yinit is None else Yinit   
 
-        # Fit GP and optimize hyperparams
+        # INITIALIZE GP
+        # --
+        # Fit GP:
         self.gp_regression(self.X, self.Y)
+        # Set constraints on GP using dedicated function:
+        if self.gp_set_constraints is not None:
+            self.gp_set_constraints(self.gp)
+        # Optimize new data:    
         self.gp_optimize()
-            
+    
+    # METHOD: Optimization objective
+    # --        
     def opt_objective(self, X=None):
         """ Optimization objective for DIRECT """
         if X is None:
@@ -214,30 +219,44 @@ class BQ(object):
         cost = ( self.evaluate_prior(X)**2 ) * tilde_cov * ( tilde_mean**2 )
         return( -cost , 0 )
 
+    # METHOD: Predict next sample location
+    # --    
+    def find_next_sample(self):            
+        """ Find lcoation of next sample """
         
-    def predict_sample(self):            
-        """ Active sampler based on chosen method """
         # Optimization range:
         if self.prior_type == "normal":
             mu = self.prior_parameters['mu']
             sigma = self.prior_parameters['sigma']
             lower_const = mu - 3*sigma
             upper_const = mu + 3*sigma
-        # Wrap the function:    
+            
+        # Wrap the optimization objective to use it within solve:    
         def mod_opt_obj(X, self):
             return(self.opt_objective(np.array([X])))
-        # Optimize    
-        Xstar, _, _ = solve(mod_opt_obj, lower_const, upper_const, user_data=self, algmethod = 1,
-                                 maxT = 333, maxf = 1000)
-        return(Xstar)  
+            
+        # Optimize: search for new location   
+        kwargs = self.par_solve
+        Xstar, _, _ = solve(mod_opt_obj, 
+                            lower_const,
+                            upper_const,
+                            user_data=self, 
+                            **kwargs)     
+        # Assign result:
+        self.Xstar = Xstar
+        print("\nPredicted new sample (Xstar): " + str(Xstar) + "\n")
 
-    def sample(self, N=1):
+    # METHOD: Sample N samles
+    # --
+    def sample(self, N = 1):
+        """ Sample N times """
         for n in range(0,N):
             # first sampling iteration
             if self.Xstar is None:
                 # Get new sample
-                self.Xstar = self.predict_sample()
-                self.Ystar = self.likelihood_l(self.Xstar)
+                self.find_next_sample()
+            
+            self.Ystar = self.likelihood_l(self.Xstar)
                 
             # Update X and Y
             self.X = np.append(self.X, self.Xstar)
@@ -245,28 +264,95 @@ class BQ(object):
             self.Y = np.append(self.Y, self.Ystar)
             self.Y = np.array([self.Y]).T
             # Refit the model
-            self.gp_regression(self.X,self.Y)
+            self.gp_regression(self.X, self.Y)
+            if self.gp_set_constraints is not None:
+                self.gp_set_constraints(self.gp) 
             self.gp_optimize()
             
-            # Get new sample
-            Xstar = self.predict_sample()
-            Ystar = self.likelihood_l(Xstar)
             # Update Xstar
-            self.Xstar = Xstar
-            self.Ystar = Ystar
+            self.Xstar = None
+    
+    # %%
+    #
+    # ##### ##### #####     METHODS: OUTPUT     ##### ##### ##### #
+    #
+    
+    # METHOD: Print details  
+    # --
+    def details(self):
+        print("\n\n\nBayesian Quadrature object details:")
+        print("- "*25)
+        print("Input dimension: "      + str(self.dim))
+        print("Transformation type: "  + self.transformation)       
+        print("Sampling method: "      + self.sampling)   
+        print("\nPrior type: "         + self.prior_type)
+        print("Priot parameters: "), 
+        print(self.prior_parameters)
+        print("\nNumber of samples sampled: " + str(len(self.X)))
+        if self.Xstar is not None:
+            print("Next sample: " + str(self.Xstar))
+        print("\nGP details (from GPy):")
+        print("- "*10),
+        print(self.gp)
         
-        return(None)
+    # METHOD: Plot results
+    # --
+    def plot(self):
+        # PLOT 1:
+        # Fitted GP mean(x) and variance(x), prior pi(x) and likelihood l(x)
+        # Also: current samples (orange) and next sample (red)
+        ax = plt.subplot2grid((3,3), (0, 0), colspan=3, rowspan=2)
+        plt.rcParams['lines.linewidth'] = 1.5
+        # Get scale
+        if self.prior_type == "normal":
+            mu = self.prior_parameters['mu']
+            sigma = self.prior_parameters['sigma']
+            x_min = mu - 6*sigma
+            x_max = mu + 6*sigma
+        
+        # Plot GP
+        pltX  = np.array([np.linspace(x_min,x_max,1000)]).T
+        mean, cov, lower, upper = self.gp_prediction(pltX)
+        GPy.plotting.matplot_dep.base_plots.gpplot(pltX, mean, lower, upper, ax=ax)
+        # Plot likelihood:
+        plt.plot(pltX, self.likelihood_l(pltX), '-g')  
+        # Plot prior:
+        plt.plot(pltX, self.evaluate_prior(pltX), color='#ffa500')
+        # Plot observations:
+        plt.plot(self.X, self.Y, 'o', color='#ffa500', ms=5)
+        # Plot next sample:
+        if self.Xstar is not None:
+            plt.axvline(x=self.Xstar, color='r')
+        # Change axis limits:
+        plt.xlim([x_min, x_max])
+        plt.title("Bayesian Quadrature")
+        
+        # PLOT 2:
+        # Plot objective
+        ax = plt.subplot2grid((3,3), (2, 0), colspan=3)
+        pltY  = -self.opt_objective(pltX)[0]
+        pltY[0]  = 0
+        pltY[-1] = 0
+        plt.plot(pltX, pltY, 'k', alpha=0.5)
+        plt.fill(pltX, pltY, color='k', alpha=0.25)
+        # Change axis limits:
+        plt.xlim([x_min, x_max])
 
-#%% # ##### ##### ##### ##### #
+        
+#%%
 #
-#       TEST THE SCRIPT
+# ##### ##### #####     TEST THE SCRIPT     ##### ##### ##### #
 #
-##### ##### ##### ##### ##### #
 if __name__ == "__main__":
     import WaSABI_Py as wasabi
+
+    #
+    # SET UP EVERYTHING
+    # 
     
-    # Define likelihood    
-    
+    """ LIKELIHOOD: Define a likelihood l(x) function, used in Bayesian 
+        Quadrature. Likelihood is a function of X and returns Y.
+    """
     def likelihood_fcn(x):
         par = {'delta': 0.5, 'mu': 0.0, 'sigma': 0.75, 'A': 0.5, 'phi': 10.0, 'offset': 0.0}    
         # Compute components of y:
@@ -276,39 +362,78 @@ if __name__ == "__main__":
         # Return y:
         y = y_a + y_b * y_c + par['offset']
         return(y)
+        
+    """ PRIOR: Set parameters for default ("normal") prior. If not specified, 
+        parameters are set to default ({"mu": 0.00, "sigma": 1.00})
+    """
+    prior_parameters = {"mu": 0.10, "sigma": 1.5}
     
-    # Create quadrature object    
-    bqm = wasabi.BQ(dim=1, likelihood_l=likelihood_fcn)
-    # Set GP kernel    
-    bqm.gp_kernel = GPy.kern.RBF(input_dim = 1)
-    # Set prior    
-    bqm.set_prior_parameters()
+    """ GP KERNEL: Set up kernel for the Gaussian Process. Kernel is defined in
+        the same manner as in GPy.
+    """    
+    gp_kernel = GPy.kern.RBF(input_dim=1)
+    
+    """ GP OPTMIMIZATION CONSTRAINTS: Set constraints for the GP optimization.
+        Set the same as for GPy.
+    """  
+    def gp_set_constraints(gp):
+        gp.unconstrain('')
+        gp.rbf.variance.constrain_positive()
+        gp.rbf.lengthscale.constrain_bounded(0.0, 1.0)
+        gp.Gaussian_noise.variance.constrain_fixed(0.001**2)
+    
+    #
+    # CREATE QUADRATURE OBJECT AND PERFORM SAMPLING
+    #   
 
-    # Initialize sampler (draw 1st sample)
-    #Xinit = np.array([np.linspace(-7.5,7.5,150)]).T
-    #Xinit = np.array([[0]])
-    Xinit = None
-    bqm.initialize_sampler(Xinit=Xinit)
-    
-    # Set boundaries on parameters and reoptimize
-    bqm.gp.unconstrain('')
-    bqm.gp.rbf.variance.constrain_positive()
-    bqm.gp.rbf.lengthscale.constrain_bounded(0.0,.25)
-    bqm.gp.Gaussian_noise.constrain_fixed(bqm.obs_noise**2)
-    bqm.gp_optimize()
-    # Get samples using quadrature:
-    bqm.sample(N=10)
+    """ BQ OBJECT: Pass mandatory parameters to create BQ object.
+        ---
+        
+        PARAMETERS:
+        - dim:                  Input dimension (default: 1)
+        - obs_noise:            Observation noise std (default: 0.001)
+        - likelihood_l:         Likelihood function (mandatory)
+        - gp_kernel:            GP kernel from GPy (mandatory)
+        - gp_set_constraints:   Function setting constraints for GP (optional)
+        - prior_type:           Prior type (default: "normal")
+        - prior_prameters:      Set parameters of the prior, if None then the
+                                default ones for given prior type are set 
+                                (optional)
+        - transformations:      Transformation type (default: "wsabi-l")
+        - sampling:             Sampling method (default: "uncertainty").                  
+    """
+    bqm = wasabi.BQ(likelihood_l        = likelihood_fcn, 
+                    gp_set_constraints  = gp_set_constraints,
+                    gp_kernel           = gp_kernel,
+                    prior_parameters    = prior_parameters)
 
-    # Print details
-    #bqm.details()  
-    bqm.plot()    
+    """ SAMPLER INITIALIZATION: It can be done either randomly (no parameters, 
+        initial sample sampled from prior) or using given values both for 
+        initial Xinit and Yinit. If Yinit is not specified, it will be 
+        computed using likelihood and Xinit. 
+        
+        Example:
+        --
+        Xinit = np.array([np.linspace(-7.5,7.5,15)]).T
+    """
+    bqm.initialize_sampler()
     
-#    # How to use different methods:
-#    # ----------    
-#    # Data points:
-#    X = np.array([[-2.0],[0.0], [2.0]])
-#    Y = np.array([ [4.0],[0.0], [4.0]])
-#    # Regression
-#    bqm.gp_regression(X,Y)
-#    # Optimize
-#    bqm.gp_optimize()
+    """ SAMPLING: Sample N (default N=1) samples using defined sampling method. 
+        Available options or now: 'uncertainty'. New samples and corresponding 
+        likelihood values are stored as self.X and self.Y
+    """
+    bqm.sample(N=25)  
+    
+    """ FIND NEXT SAMPLE (optional): Use optimization to find new sample 
+        location. New samples is stored as self.Xstar. This is optional, 
+        if there is no next sample found, it will not be plotted.
+    """    
+    bqm.find_next_sample()
+    
+    """ PLOTTING: Plot everything.
+    """
+    bqm.plot()
+    
+    """ DETAILS: Print details about the BQ object.
+    """
+    bqm.details()
