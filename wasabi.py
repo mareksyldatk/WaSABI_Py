@@ -11,17 +11,66 @@ TODO Notes:
 [ ] sample() and initialization() - remove model refitting, compact the 
     repeated code int oone method to avoid problems
 [ ] add mean_Z() and var_Z(): methods to compute mean and var of the integral
-[ ] bind selection of prior with computein mean_Z
+[ ] simplify to support only one kernel and one prior type, but multiple transformations
 [ ] test from command line
+[ ] verify with mcmc
 """
 
 from __future__ import division
 import GPy
 import numpy as np
-import scipy as sp
-import wasabi_support as ws
+# import scipy as sp
 import matplotlib.pyplot as plt
 from DIRECT import solve
+
+'''
+SUPPORT FUNCTIONS
+-----
+Set of basic support functions used in the rest of the code.
+'''
+
+# Reshape vector to column/row:
+def to_column(x):
+    if (x.__class__ == np.ndarray):
+        return(x.reshape(-1,1))
+    elif (x.__class__ == list):
+        return(np.array([x]).reshape(-1,1))
+    else:
+        return(np.array([[x]]).reshape(-1,1))
+
+def to_row(x):
+    if (x.__class__ == np.ndarray):
+        return(x.reshape(1,-1))
+    elif (x.__class__ == list):
+        return(np.array([x]).reshape(1,-1))
+    else:
+        return(np.array([[x]]).reshape(1,-1))
+        
+# Multivariable Normal PDF:    
+def mvn_pdf(X, mean, cov):
+    X, mean     = to_column(X), to_column(mean)
+    k           = len(cov)
+    den = np.sqrt( (2.0*np.pi)**k * np.linalg.det(cov))
+    nom = np.exp( -0.5 * ((X-mean).T).dot(np.linalg.solve(cov, (X-mean))) )
+    return( (nom/den)[0][0] )
+
+# Covariance matrix symmetrizations:    
+def symetrize_cov(P):
+    return (P + P.T)/2.0
+    
+def mrdivide(B,A):   
+    ''' Solves x A = B ==> x = B A^{-1}
+        x = ( (A^T)^{-1} B^T )^T 
+        Corresponds to matlabs B/A
+    '''
+    x_solve = (np.linalg.solve(A.T,B.T)).T
+    # x_lstsq = (np.linalg.lstsq(A.T,B.T)).T
+    return(x_solve)
+'''
+QUADRATURE CLASS
+-----
+Code defining BQ class
+'''
 
 #%% Define BQ Class
 class BQ(object):
@@ -29,7 +78,6 @@ class BQ(object):
 
     # Constructor:
     def __init__(self, 
-                 dim                = 1, 
                  obs_noise          = 0.001, 
                  likelihood_l       = None, 
                  gp_kernel          = None,
@@ -43,7 +91,7 @@ class BQ(object):
         # BASIC SETTINGS:
         # ----------
         # Input dimension
-        self.dim                = dim
+        self.dim                = None
         # Set transformation/approximation/sampling type:
         self.transformation     = transformation
         self.sampling           = sampling
@@ -70,8 +118,8 @@ class BQ(object):
         self.gp_kernel          = gp_kernel
         # Set GP parameter constraints using function:
         self.gp_set_constraints = gp_set_constraints
-        # Set optional optimization/regression/prediction parameters:
-        self.par_optimization   = {"num_restarts": 10, "verbose": False}
+        # Set optional hyper-param optimization/regression/prediction parameters:
+        self.par_optimization   = {"num_restarts": 16, "verbose": False}
         self.par_regression     = {}
         self.par_prediction     = {}
         
@@ -83,12 +131,12 @@ class BQ(object):
         # ----------
         # Prior type:
         self.prior_type         = prior_type  
-        # Set default prior parameters dependint on prior type:
+        # Set default prior parameters depending on prior type:
         self.prior_parameters   = prior_parameters     
         
         # PyDIRECT SOLVE PARAMETERS:
         # ----------
-        self.par_solve =  {"algmethod": 1, "maxT": 333, "maxf": 1000}    
+        self.par_solve =  {"algmethod": 1, "maxT": 100, "maxf": 100}    
     
     # %%
     #
@@ -98,14 +146,14 @@ class BQ(object):
     def gp_regression(self, X, Y, **kwargs):
         """ Fit the Gaussian Process.
             Method uses GPy.models.GPRegression() to fit the GP model, using
-            previously defined kernel. """
+            previously defined kernel and selected transformation. """
         # Default parameters:    
         if len(kwargs) == 0:
             kwargs = self.par_regression
         
         # Apply transformation
         if self.transformation == "wsabi-l":
-            newY, self.alpha = ws.log_transform(Y)  
+            newY, self.alpha = self.sqrt_transform(Y)  
         else:
             newY = Y
         
@@ -118,8 +166,10 @@ class BQ(object):
             parameters. """
         if len(kwargs) == 0:
             kwargs = self.par_optimization
-            
-        self.gp.optimize_restarts(**kwargs)
+
+        # Optimize only if number of optimization iterations is set:
+        if (self.par_optimization['num_restarts'] != 0):            
+            self.gp.optimize_restarts(**kwargs)
         
     def gp_prediction(self, Xnew, **kwargs):
         """ GP prediction of mean, variance and confidence interval. Function
@@ -131,7 +181,7 @@ class BQ(object):
         
         # Invert the transformation:
         if self.transformation == "wsabi-l":
-            mean, cov, lower, upper = ws.log_transform_inv(mean, cov, self.alpha)
+            mean, cov, lower, upper = self.sqrt_transform_inv(mean, cov)
             
         # Return all
         return(mean, cov, lower, upper)
@@ -148,7 +198,7 @@ class BQ(object):
             
         # Normal prior (default)
         if self.prior_type == "normal":
-            self.prior_parameters = {"mu": 0.00, "sigma": 1.00}
+            self.prior_parameters = {"mean": to_row(0.00), "cov": np.diag([1.00])}
         
     
     # METHOD: Get N samples from prior:
@@ -157,11 +207,10 @@ class BQ(object):
         """ Draw N samples from the prior. """
         # Normal prior (default):
         if self.prior_type == "normal":
-            mu      = self.prior_parameters['mu']
-            sigma   = self.prior_parameters['sigma']
-            samples = np.random.normal(mu, sigma, N)
-            # Convert to numpy array
-            samples = np.array([[s] for s in samples])
+            mean    = self.prior_parameters['mean'][0]
+            cov     = self.prior_parameters['cov']
+            samples = np.random.multivariate_normal(mean, cov, N)
+            
         return (samples)
     
     # METHOD: Evaluate prior at given X
@@ -170,11 +219,22 @@ class BQ(object):
         """ Evaluate value of prior at given point. """
         # Normal prior (default):
         if self.prior_type == "normal":
-            mu     = self.prior_parameters['mu']
-            sigma  = self.prior_parameters['sigma']
-            result = sp.stats.norm.pdf(X, mu, sigma)
+            mean   = self.prior_parameters['mean'][0]
+            cov    = self.prior_parameters['cov']
+            result = np.apply_along_axis(mvn_pdf, 1, X, mean, cov)
             
         return(result)
+    # %%
+    #
+    # ##### ##### #####     METHODS: LIKELIHOOD     ##### ##### ##### #
+    #
+    
+    # METHOD: Evaluate likelihood at given X
+    # -- 
+    def evaluate_likelihood(self, X):
+        """ Evaluate likelihood on given X. """
+        Y = np.apply_along_axis(self.likelihood_l, 1, X)
+        return(Y)
         
     # %%
     #
@@ -195,12 +255,13 @@ class BQ(object):
         # --
         # Set initial sample(s)
         # Randomly sampled from prior or set using Xinit
-        self.X = self.sample_prior(1) if Xinit is None else Xinit        
+        # self.X = self.sample_prior(1) if Xinit is None else Xinit   
+        self.X = self.prior_parameters['mean'] if Xinit is None else Xinit  
         
         # Set initial observation(s)
         # Evaluated on X or set using Yinit
-        self.Y = self.likelihood_l(self.X) if Yinit is None else Yinit   
-
+        self.Y = self.evaluate_likelihood(self.X) if Yinit is None else Yinit   
+        
         # INITIALIZE GP
         # --
         # Fit GP:
@@ -210,16 +271,24 @@ class BQ(object):
             self.gp_set_constraints(self.gp)
         # Optimize new data:    
         self.gp_optimize()
+        
+        # SET DIM:
+        # --
+        self.dim = self.gp.input_dim
     
     # METHOD: Optimization objective
     # --        
-    def opt_objective(self, X=None):
+    def opt_objective(self, X, return_zero=True):
         """ Optimization objective for DIRECT """
-        if X is None:
-            X = self.X
+        X = to_row(X)
+        # TODO: what happens to tilde_mean in multidim case??
         tilde_mean, tilde_cov, _ , _ = self.gp_prediction(X)
-        cost = ( self.evaluate_prior(X)**2 ) * tilde_cov * ( tilde_mean**2 )
-        return( -cost , 0 )
+        # cost = ( self.evaluate_prior(X)**2 ) * tilde_cov * ( tilde_mean**2 )
+        cost = ( self.evaluate_prior(X)**2 ) * tilde_cov * ( np.dot(tilde_mean, tilde_mean.T) )
+        if return_zero:
+            return( -cost , 0 )
+        else:
+            return( -cost )
 
     # METHOD: Predict next sample location
     # --    
@@ -228,14 +297,15 @@ class BQ(object):
         
         # Optimization range:
         if self.prior_type == "normal":
-            mu = self.prior_parameters['mu']
-            sigma = self.prior_parameters['sigma']
-            lower_const = mu - 3*sigma
-            upper_const = mu + 3*sigma
+            mean = self.prior_parameters['mean']
+            cov  = self.prior_parameters['cov']
+            # TODO: Check if picking diag is OK
+            lower_const = mean - 6.0*np.sqrt(cov.diagonal())
+            upper_const = mean + 6.0*np.sqrt(cov.diagonal())
             
         # Wrap the optimization objective to use it within solve:    
         def mod_opt_obj(X, self):
-            return(self.opt_objective(np.array([X])))
+            return(self.opt_objective(X))
             
         # Optimize: search for new location   
         kwargs = self.par_solve
@@ -245,7 +315,7 @@ class BQ(object):
                             user_data=self, 
                             **kwargs)     
         # Assign result:
-        self.Xstar = Xstar
+        self.Xstar = to_row(Xstar)
         print("\nPredicted new sample (Xstar): " + str(Xstar) + "\n")
 
     # METHOD: Sample N samles
@@ -258,13 +328,12 @@ class BQ(object):
                 # Get new sample
                 self.find_next_sample()
             
-            self.Ystar = self.likelihood_l(self.Xstar)
+            self.Ystar = self.evaluate_likelihood(self.Xstar)
                 
             # Update X and Y
-            self.X = np.append(self.X, self.Xstar)
-            self.X = np.array([self.X]).T
-            self.Y = np.append(self.Y, self.Ystar)
-            self.Y = np.array([self.Y]).T
+            self.X = np.vstack((self.X, self.Xstar))
+            self.Y = np.vstack((self.Y, self.Ystar))      
+            
             # Refit the model
             self.gp_regression(self.X, self.Y)
             if self.gp_set_constraints is not None:
@@ -273,6 +342,62 @@ class BQ(object):
             
             # Update Xstar
             self.Xstar = None
+    
+    # %%
+    #
+    # ##### ##### #####     METHODS: INTEGRAL     ##### ##### ##### #
+    #
+    # METHOD: Support function computing z for normal prior
+    # --
+    def compute_z(self, a, A, b, B, I, w_0):
+        ''' Computes z for closed form solution integral '''
+        # Make sure of column vectors:
+        a, b = to_column(a), to_column(b)
+        # Compute z:
+        denominator = np.sqrt(np.linalg.det((np.linalg.solve(A,B)+I)))
+        z = (w_0/denominator) * np.exp(-.5*((a-b).T).dot(np.linalg.solve((A+B),(a-b))))   
+        return(z[0][0])
+        
+    # METHOD: Compute integral
+    # --
+    def compute_integral(self):
+        ''' Compute mean and variance of the integral '''
+        # For a normal prior:
+        if self.prior_type == 'normal':
+            
+            # For WASABI-L transformation:
+            if self.transformation == "wsabi-l":
+                E_int = V_int = None
+                
+            # For a case of no transformation:
+            else:
+                # Fitted GP parameters      
+                w_0 = self.gp.rbf.variance.tolist()[0]
+                w_d = np.power(self.gp.rbf.lengthscale.tolist(), 2)
+        
+                # Parameters
+                A = np.diag(w_d)
+                I = np.eye(self.dim)     
+        
+                # Prior
+                prior_mean = self.prior_parameters['mean']
+                prior_cov  = self.prior_parameters['cov']
+                
+                # Compute z:
+                z = [self.compute_z(x, A, prior_mean, prior_cov, I, w_0) for x in self.X]
+                z = to_column(np.array(z))
+                K = self.gp.kern.K(self.X)
+                K = symetrize_cov(K)
+                
+                # Compute mean and variance of integral
+                # TODO: check if V_int works properly
+                E_int = (z.T).dot( np.linalg.solve(K, self.Y) )
+                V_int = w_0/np.sqrt(np.linalg.det( 2*np.linalg.solve(A, prior_cov) + I) ) - (z.T).dot(np.linalg.solve(K,z))
+                
+        # Return computed values:
+        return(E_int, V_int)        
+        
+    
     
     # %%
     #
@@ -300,46 +425,105 @@ class BQ(object):
     # METHOD: Plot results
     # --
     def plot(self):
-        plt.figure()
-        # PLOT 1:
-        # Fitted GP mean(x) and variance(x), prior pi(x) and likelihood l(x)
-        # Also: current samples (orange) and next sample (red)
-        ax = plt.subplot2grid((3,3), (0, 0), colspan=3, rowspan=2)
-        plt.rcParams['lines.linewidth'] = 1.5
-        # Get scale
-        if self.prior_type == "normal":
-            mu = self.prior_parameters['mu']
-            sigma = self.prior_parameters['sigma']
-            x_min = mu - 6*sigma
-            x_max = mu + 6*sigma
+        if (self.dim == 1):
+            plt.figure()
+            # PLOT 1:
+            # Fitted GP mean(x) and variance(x), prior pi(x) and likelihood l(x)
+            # Also: current samples (orange) and next sample (red)
+            ax = plt.subplot2grid((3,3), (0, 0), colspan=3, rowspan=2)
+            plt.rcParams['lines.linewidth'] = 1.5
+            # Get scale
+            if self.prior_type == "normal":
+                mean = self.prior_parameters['mean']
+                cov  = self.prior_parameters['cov']
+                x_min = mean - 6.0*np.sqrt(cov.diagonal())
+                x_max = mean + 6.0*np.sqrt(cov.diagonal())
+                
+            # Squeeze x_min and x_max for linspace    
+            x_min = x_min.squeeze()
+            x_max = x_max.squeeze()
+            # Plot GP
+            pltX  = to_column(np.linspace(x_min,x_max,1000))
+            
+            mean, cov, lower, upper = self.gp_prediction(pltX)
+            
+            GPy.plotting.matplot_dep.base_plots.gpplot(pltX, mean, lower, upper, ax=ax)
+            # Plot likelihood:
+            plt.plot(pltX, self.evaluate_likelihood(pltX), '-g')  
+            # Plot prior:
+            plt.plot(pltX, self.evaluate_prior(pltX), color='#ffa500')
+            # Plot observations:
+            plt.plot(self.X, self.Y, 'o', color='#ffa500', ms=5)
+            # Plot next sample:
+            if self.Xstar is not None:
+                plt.axvline(x=self.Xstar, color='r')
+            # Change axis limits:
+            plt.xlim([x_min, x_max])
+            plt.title("Bayesian Quadrature")
+            
+            # PLOT 2:
+            # Plot objective
+            ax = plt.subplot2grid((3,3), (2, 0), colspan=3)
+            return_zero = False
+            pltY  = -np.apply_along_axis(self.opt_objective, 1, pltX, return_zero)
+            self.pltY = pltY
+            pltY[0]  = 0
+            pltY[-1] = 0
+            plt.plot(pltX, pltY, 'k', alpha=0.5)
+            plt.fill(pltX, pltY, color='k', alpha=0.25)
+            # Plot next sample:
+            if self.Xstar is not None:
+                plt.axvline(x=self.Xstar, color='r')
+            # Change axis limits:
+            plt.xlim([x_min, x_max])
+        else:
+            #TODO: Add multidimensional (at least 2) plotting option:
+            print("Plot only supported for 1 dimensional input!")
+
+
+    # %%
+    #
+    # ##### ##### #####     METHODS: WSABI-L     ##### ##### ##### #
+    #
+    
+    # METHOD: Square root transform
+    # --  
+    # Applicable only for likelihoods
+    def sqrt_transform(self, l_x):
+        #    alpha = 0.5*np.min(l_x)
+        #    tilde_l = np.sqrt(2*(l_x-alpha))
+        #    return (tilde_l, alpha)  
+        alpha   = 0.8 * l_x.min(axis=0)
+        tilde_l = np.sqrt(2*(l_x-alpha))
+        return (tilde_l, alpha)  
         
-        # Plot GP
-        pltX  = np.array([np.linspace(x_min,x_max,1000)]).T
-        mean, cov, lower, upper = self.gp_prediction(pltX)
-        GPy.plotting.matplot_dep.base_plots.gpplot(pltX, mean, lower, upper, ax=ax)
-        # Plot likelihood:
-        plt.plot(pltX, self.likelihood_l(pltX), '-g')  
-        # Plot prior:
-        plt.plot(pltX, self.evaluate_prior(pltX), color='#ffa500')
-        # Plot observations:
-        plt.plot(self.X, self.Y, 'o', color='#ffa500', ms=5)
-        # Plot next sample:
-        if self.Xstar is not None:
-            plt.axvline(x=self.Xstar, color='r')
-        # Change axis limits:
-        plt.xlim([x_min, x_max])
-        plt.title("Bayesian Quadrature")
+    # METHOD: Inverse sqrt transform
+    # --  
+    # Applicable only to likelihoods:
+    def sqrt_transform_inv(self, tilde_mean, tilde_cov):
+        #TODO: Check the inverse transformation with the paper for mdim case
+        #TODO: Make it suitalbe for pair (x,x') - grant acces to gp
+    
+        # mean  = alpha + 0.5*tilde_mean**2
+        # cov   = tilde_mean*tilde_cov*tilde_mean 
         
-        # PLOT 2:
-        # Plot objective
-        ax = plt.subplot2grid((3,3), (2, 0), colspan=3)
-        pltY  = -self.opt_objective(pltX)[0]
-        pltY[0]  = 0
-        pltY[-1] = 0
-        plt.plot(pltX, pltY, 'k', alpha=0.5)
-        plt.fill(pltX, pltY, color='k', alpha=0.25)
-        # Change axis limits:
-        plt.xlim([x_min, x_max])
+        mean = None
+        cov  = None
+        
+        for i in range(0, len(tilde_mean)):
+            mean_row = self.alpha + 0.5*tilde_mean[i]**2 
+            cov_row  = tilde_cov[i]* np.dot(tilde_mean[i], tilde_mean[i].T)
+            mean = mean_row if i == 0 else np.vstack((mean, mean_row))
+            cov  = cov_row  if i == 0 else np.vstack((cov,  cov_row))
+        
+        # Lower and upper bounds only for 1 dim scenario (used for plot)
+        if (self.dim == 1):
+            lower = mean - 1.96*np.sqrt(cov)
+            upper = mean + 1.96*np.sqrt(cov)
+        else:
+            lower = upper = None
+            
+        return(mean, cov, lower, upper)    
 
         
 #%%
@@ -355,8 +539,12 @@ if __name__ == "__main__":
     
     """ LIKELIHOOD: Define a likelihood l(x) function, used in Bayesian 
         Quadrature. Likelihood is a function of X and returns Y.
+        Both input X and output Y are assumed row arrays, where each line 
+        represents one vector.
     """
-    def likelihood_fcn(x):
+    def likelihood_fcn_one_dim(x):
+        #TODO: fix this squeeze
+        x = x.squeeze()
         par = {'delta': 0.5, 'mu': 0.0, 'sigma': 0.75, 'A': 0.5, 'phi': 10.0, 'offset': 0.0}    
         # Compute components of y:
         y_a = (1.0 - np.exp(par['delta']*x)/(1+np.exp(par['delta']*x)))
@@ -364,26 +552,46 @@ if __name__ == "__main__":
         y_c = par['A']* np.cos(par['phi']*x)
         # Return y:
         y = y_a + y_b * y_c + par['offset']
+        y = to_row(y)
+        return(y)
+        
+    def likelihood_fcn_multi_dim(x):
+        par = {'delta': 0.5, 'mu': 0.0, 'sigma': 0.75, 'A': 0.5, 'phi': 10.0, 'offset': 0.0}    
+        # Compute components of y:
+        y_a = (1.0 - np.exp(par['delta']*x[0])/(1+np.exp(par['delta']*x[0])))
+        y_b = np.exp(-(x[1]-par['mu'])**2 / par['sigma'])
+        y_c = par['A']* np.cos(par['phi']*x[1])
+        # Return y:
+        y = y_a + y_b * y_c + par['offset']
+        y = to_row(y)
         return(y)
         
     """ PRIOR: Set parameters for default ("normal") prior. If not specified, 
-        parameters are set to default ({"mu": 0.00, "sigma": 1.00})
+        parameters are set to default ({"mean": 0.00, "cov": 1.00})
     """
-    prior_parameters = {"mu": 0.10, "sigma": 1.5}
+    prior_mean = to_row([0])
+    prior_cov  = np.diag([.5])
+    prior_parameters = {"mean": prior_mean, "cov": prior_cov}
     
     """ GP KERNEL: Set up kernel for the Gaussian Process. Kernel is defined in
         the same manner as in GPy.
+        NOTE: Currently only supported rbf kernel!
     """    
-    gp_kernel = GPy.kern.RBF(input_dim=1)
+    gp_kernel = GPy.kern.RBF(input_dim=1, ARD=True)
     
     """ GP OPTMIMIZATION CONSTRAINTS: Set constraints for the GP optimization.
         Set the same as for GPy.
+        NOTE: Currently only supported parameters for rbf kernel!
     """  
     def gp_set_constraints(gp):
         gp.unconstrain('')
         gp.rbf.variance.constrain_positive()
-        gp.rbf.lengthscale.constrain_bounded(0.0, 1.0)
-        gp.Gaussian_noise.variance.constrain_fixed(0.001**2)
+        gp.rbf.lengthscale.constrain_bounded(0.1, 5.0)
+        #gp.rbf.variance.constrain_fixed(1.0, warning=False)        
+        #gp.rbf.lengthscale.constrain_fixed(1.0, warning=False)
+        gp.Gaussian_noise.variance.constrain_fixed(0.0001**2, warning=False)
+        
+        return(gp)
     
     #
     # CREATE QUADRATURE OBJECT AND PERFORM SAMPLING
@@ -405,11 +613,14 @@ if __name__ == "__main__":
         - transformations:      Transformation type (default: "wsabi-l")
         - sampling:             Sampling method (default: "uncertainty").                  
     """
-    bqm = wasabi.BQ(likelihood_l        = likelihood_fcn, 
+    bqm = wasabi.BQ(likelihood_l        = likelihood_fcn_one_dim, 
                     gp_kernel           = gp_kernel,
- #                   gp_set_constraints  = gp_set_constraints,
-                    prior_parameters    = prior_parameters)
-
+                    gp_set_constraints  = gp_set_constraints,
+                    prior_parameters    = prior_parameters,
+                    transformation      = 'wsabi-l')
+                    
+    bqm.par_optimization['num_restarts'] = 8
+    
     """ SAMPLER INITIALIZATION: It can be done either randomly (no parameters, 
         initial sample sampled from prior) or using given values both for 
         initial Xinit and Yinit. If Yinit is not specified, it will be 
@@ -425,7 +636,7 @@ if __name__ == "__main__":
         Available options or now: 'uncertainty'. New samples and corresponding 
         likelihood values are stored as self.X and self.Y
     """
-    bqm.sample(N=5)  
+    bqm.sample(N=32)  
     
     """ FIND NEXT SAMPLE (optional): Use optimization to find new sample 
         location. New samples is stored as self.Xstar. This is optional, 
@@ -440,3 +651,7 @@ if __name__ == "__main__":
     """ DETAILS: Print details about the BQ object.
     """
     bqm.details()
+    
+    """ COMPUTE INTEGRAL:
+    """
+    print(bqm.compute_integral())
