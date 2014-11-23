@@ -11,6 +11,8 @@ TODO Notes:
 [ ] sample() and initialization() - remove model refitting, compact the 
     repeated code int oone method to avoid problems
 [ ] add mean_Z() and var_Z(): methods to compute mean and var of the integral
+[ ] bind selection of prior with computein mean_Z
+[ ] test from command line
 """
 
 from __future__ import division
@@ -298,6 +300,7 @@ class BQ(object):
     # METHOD: Plot results
     # --
     def plot(self):
+        plt.figure()
         # PLOT 1:
         # Fitted GP mean(x) and variance(x), prior pi(x) and likelihood l(x)
         # Also: current samples (orange) and next sample (red)
@@ -344,7 +347,7 @@ class BQ(object):
 # ##### ##### #####     TEST THE SCRIPT     ##### ##### ##### #
 #
 if __name__ == "__main__":
-    import WaSABI_Py as wasabi
+    import wasabi as wasabi
 
     #
     # SET UP EVERYTHING
@@ -403,8 +406,8 @@ if __name__ == "__main__":
         - sampling:             Sampling method (default: "uncertainty").                  
     """
     bqm = wasabi.BQ(likelihood_l        = likelihood_fcn, 
-                    gp_set_constraints  = gp_set_constraints,
                     gp_kernel           = gp_kernel,
+ #                   gp_set_constraints  = gp_set_constraints,
                     prior_parameters    = prior_parameters)
 
     """ SAMPLER INITIALIZATION: It can be done either randomly (no parameters, 
@@ -422,7 +425,7 @@ if __name__ == "__main__":
         Available options or now: 'uncertainty'. New samples and corresponding 
         likelihood values are stored as self.X and self.Y
     """
-    bqm.sample(N=25)  
+    bqm.sample(N=5)  
     
     """ FIND NEXT SAMPLE (optional): Use optimization to find new sample 
         location. New samples is stored as self.Xstar. This is optional, 
