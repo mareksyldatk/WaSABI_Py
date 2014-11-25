@@ -13,7 +13,9 @@ TODO Notes:
 [ ] add mean_Z() and var_Z(): methods to compute mean and var of the integral
 [ ] simplify to support only one kernel and one prior type, but multiple transformations
 [ ] test from command line
-[ ] verify with mcmc
+[ ] verify with mc
+[ ] Add **kwargs to likelihood computation
+[ ] Add setseed
 """
 
 from __future__ import division
@@ -308,15 +310,34 @@ class BQ(object):
             return(self.opt_objective(X))
             
         # Optimize: search for new location   
-        kwargs = self.par_solve
-        Xstar, _, _ = solve(mod_opt_obj, 
-                            lower_const,
-                            upper_const,
-                            user_data=self, 
-                            **kwargs)     
+        # For 1 dimensionl input use grid search
+        if (self.dim == 1):
+            # Use grid:
+            #TODO: Make it adjustable
+            GRID_SIZE = 2500
+            GRID_STEP = 0.01
+            # Generate grid:
+            X_grid = np.linspace(lower_const[0], upper_const[0], GRID_SIZE)
+            #X_grid = np.arange(lower_const[0], upper_const[0], GRID_STEP)
+            X_grid = to_column(X_grid)
+            # Calculate objective:
+            objective = np.apply_along_axis(self.opt_objective, 1, X_grid, False)
+            objective = objective.tolist()
+            
+            # Pick X that maximizes the objective:
+            max_ind = objective.index(min(objective)) # min since -cost         
+            Xstar   = np.array([X_grid[max_ind]])    
+        else:
+            # Use DIRECT:
+            kwargs = self.par_solve
+            Xstar, _, _ = solve(mod_opt_obj, 
+                                lower_const,
+                                upper_const,
+                                user_data=self, 
+                                **kwargs)     
         # Assign result:
         self.Xstar = to_row(Xstar)
-        print("\nPredicted new sample (Xstar): " + str(Xstar) + "\n")
+        print("Predicted new sample (Xstar): " + str(Xstar))
 
     # METHOD: Sample N samles
     # --
@@ -524,6 +545,18 @@ class BQ(object):
             lower = upper = None
             
         return(mean, cov, lower, upper)    
+        
+    # %%
+    #
+    # ##### ##### #####     METHODS: Simple Monte Carlo     ##### ##### ##### #
+    #      
+    def monte_carlo(self, N = 1000):
+        # Sample prior:
+        mc_X = self.sample_prior(N)
+        mc_Y = self.evaluate_likelihood(mc_X)
+        E_int = np.mean(mc_Y, axis=0)
+        V_int = np.cov(mc_Y, rowvar=0)
+        return(E_int, V_int)
 
         
 #%%
@@ -570,7 +603,7 @@ if __name__ == "__main__":
         parameters are set to default ({"mean": 0.00, "cov": 1.00})
     """
     prior_mean = to_row([0])
-    prior_cov  = np.diag([.5])
+    prior_cov  = np.diag([1])
     prior_parameters = {"mean": prior_mean, "cov": prior_cov}
     
     """ GP KERNEL: Set up kernel for the Gaussian Process. Kernel is defined in
@@ -585,8 +618,8 @@ if __name__ == "__main__":
     """  
     def gp_set_constraints(gp):
         gp.unconstrain('')
-        gp.rbf.variance.constrain_positive()
-        gp.rbf.lengthscale.constrain_bounded(0.1, 5.0)
+        gp.rbf.variance.constrain_positive(warning=False)
+        gp.rbf.lengthscale.constrain_bounded(0.1, 5.0,warning=False)
         #gp.rbf.variance.constrain_fixed(1.0, warning=False)        
         #gp.rbf.lengthscale.constrain_fixed(1.0, warning=False)
         gp.Gaussian_noise.variance.constrain_fixed(0.0001**2, warning=False)
@@ -617,9 +650,9 @@ if __name__ == "__main__":
                     gp_kernel           = gp_kernel,
                     gp_set_constraints  = gp_set_constraints,
                     prior_parameters    = prior_parameters,
-                    transformation      = 'wsabi-l')
+                    transformation      = 'none')
                     
-    bqm.par_optimization['num_restarts'] = 8
+    bqm.par_optimization['num_restarts'] = 4
     
     """ SAMPLER INITIALIZATION: It can be done either randomly (no parameters, 
         initial sample sampled from prior) or using given values both for 
@@ -636,7 +669,7 @@ if __name__ == "__main__":
         Available options or now: 'uncertainty'. New samples and corresponding 
         likelihood values are stored as self.X and self.Y
     """
-    bqm.sample(N=32)  
+    bqm.sample(N=64)  
     
     """ FIND NEXT SAMPLE (optional): Use optimization to find new sample 
         location. New samples is stored as self.Xstar. This is optional, 
@@ -652,6 +685,10 @@ if __name__ == "__main__":
     """
     bqm.details()
     
-    """ COMPUTE INTEGRAL:
+    """ COMPUTE INTEGRAL: Using quadrature and Monte Carlo
     """
-    print(bqm.compute_integral())
+    E, V        = bqm.compute_integral()
+    E_mc, V_mc  = bqm.monte_carlo(10000)
+    
+    print(E.squeeze(), E_mc.squeeze())
+    print(V, V_mc)
