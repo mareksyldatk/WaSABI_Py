@@ -6,12 +6,17 @@ WaSABI_Py Bayesian Quadrature package
 @references:
 [1]
 [2]
+
+@requires:
+[1] pydirect - https://bitbucket.org/amitibo/pydirect
+
 """
 
 from __future__ import division
 import GPy
 import numpy as np
 import matplotlib.pyplot as plt
+
 from DIRECT import solve
 
 '''
@@ -720,7 +725,7 @@ if __name__ == "__main__":
         New samples and corresponding likelihood values are stored as bqm.X 
         and bqm.Y
     """
-    bqm.sample(N=24)  
+    bqm.sample(N=10)  
     
     """ FIND NEXT SAMPLE (optional): Use optimization to find new sample 
         location. New samples is stored as self.Xstar. This is optional, 
